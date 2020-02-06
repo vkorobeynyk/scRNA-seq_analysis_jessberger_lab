@@ -1,0 +1,4 @@
+# ignore files
+*.ipynb
+**/cache
+**/.ipynb_checkpoints

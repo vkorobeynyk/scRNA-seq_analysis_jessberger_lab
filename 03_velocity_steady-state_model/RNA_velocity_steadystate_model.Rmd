@@ -1,0 +1,72 @@
+```{r}
+library(velocyto.R)
+library(Seurat)
+library(dplyr)
+```
+
+# Load data 
+
+```{r}
+# Load umap coordinates from SO
+umap_cord = read.table("../data/data_RNAvelocity/coordinates_umap_scvelo.txt", sep=",") %>% as.data.frame 
+umap_cord$ident = NULL
+
+# Read loom file
+file = read.loom.matrices("../data/data_RNAvelocity/s_un_am_allgenes.loom")
+
+# Load So
+load("../data/SO_Gli_Ascl_comb_int.Robj")
+
+# Annotate spliced and unspliced data
+s_data = data.frame(file$spliced)
+un_data = data.frame(file$unspliced)
+
+# attribute column names of spliced and unspliced data to have cell names 
+cells = colnames(pbmc.combined)
+cells = sub("X","",cells)
+colnames(s_data) = cells
+colnames(un_data) = cells
+s_data = as.matrix(s_data)
+un_data = as.matrix(un_data)
+
+# Annotate distance between cells
+pca_values = Embeddings(pbmc.combined, reduction = "pca")
+
+seurat_clusters = pbmc.combined@meta.data$combi
+names(seurat_clusters) = colnames(pbmc.combined)
+
+# Compute distance between cells and change clusters to colors
+cell.dist <- as.dist(1-armaCor(t(pca_values)))
+
+cell.colors = vector()
+cell.colors = ifelse(grepl("Ascl1", names(seurat_clusters)), "#4393C3", "#D6604D")
+names(cell.colors) = names(seurat_clusters)
+```
+
+```{r}
+# Filter genes by average expression
+set.seed(1)
+s_data <- filter.genes.by.cluster.expression(s_data,seurat_clusters,min.max.cluster.average = 0.2)
+un_data <- filter.genes.by.cluster.expression(un_data,seurat_clusters,min.max.cluster.average = 0.05)
+length(intersect(rownames(s_data),rownames(un_data)))
+```
+
+```{r}
+# Velocity for every cell
+set.seed(1)
+fit.quantile <- 0.02
+rvel.cd <- gene.relative.velocity.estimates(s_data,un_data,deltaT=1,kCells=25,cell.dist=cell.dist,
+                                            fit.quantile=fit.quantile, n.cores = 8)
+
+# Visualization
+show.velocity.on.embedding.cor(umap_cord %>% as.matrix,rvel.cd,n=300,scale='sqrt',cell.colors=ac(cell.colors),cex=1,
+                               arrow.scale=4,arrow.lwd=1,do.par=T, cell.border.alpha = 0.1)
+```
+
+```{r}
+# Velocity for a particular gene
+gene <- "Thrsp"
+gene.relative.velocity.estimates(s_data,un_data,deltaT=1,kCells = 20,kGenes=1,fit.quantile=fit.quantile,
+                                 cell.emb=umap_cord,cell.colors=cell.colors,cell.dist=cell.dist,
+                                 show.gene=gene,old.fit=rvel.cd,do.par=T)
+```

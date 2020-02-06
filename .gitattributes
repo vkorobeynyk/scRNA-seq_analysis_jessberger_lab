@@ -1,0 +1,10 @@
+data/SO_Gli_Ascl_comb_int.Robj filter=lfs diff=lfs merge=lfs -text
+data/Ascl1_5d_I_rawCount.txt filter=lfs diff=lfs merge=lfs -text
+data/Gli1_12w_rawCount.txt filter=lfs diff=lfs merge=lfs -text
+data/Gli1_5d_II_rawCount.txt filter=lfs diff=lfs merge=lfs -text
+data/Gli1_5d_I_rawCount.txt filter=lfs diff=lfs merge=lfs -text
+data/Ascl1_12w_II_rawCount.txt filter=lfs diff=lfs merge=lfs -text
+data/Ascl1_12w_I_rawCount.txt filter=lfs diff=lfs merge=lfs -text
+data/Ascl1_5d_II_rawCount.txt filter=lfs diff=lfs merge=lfs -text
+data/data_RNAvelocity/processed_counts.txt filter=lfs diff=lfs merge=lfs -text
+data/data_RNAvelocity/s_un_am_allgenes.loom filter=lfs diff=lfs merge=lfs -text
