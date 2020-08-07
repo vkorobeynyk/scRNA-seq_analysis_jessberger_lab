@@ -11,9 +11,9 @@ library(CellMixS)
 ```{r}
 pbmc_files = list()
 
-for (file_name in list.files("../data", pattern = "txt"))
+for (file_name in list.files("scRNA-seq_analysis_jessberger_lab/data", pattern = "txt"))
 {
-    file = read.delim(file.path("../data", file_name))
+    file = read.delim(file.path("scRNA-seq_analysis_jessberger_lab/data", file_name))
     rownames(file) = as.vector(file[,1]) %>% make.unique
     file = file[,-c(1,2)]
     pbmc = CreateSeuratObject(counts = file, min.cells = 5, min.features = 200)
@@ -26,10 +26,21 @@ for (file_name in list.files("../data", pattern = "txt"))
     plot1 = FeatureScatter(pbmc, feature1 = "nCount_RNA", feature2 = "percent.mt",)
     plot2 = FeatureScatter(pbmc, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
     plot3 = VlnPlot(pbmc, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+    
+    bottom_row <- plot_grid(plot3, ncol = 2)
     pbmc_files[[paste(file_name)]] = list(pbmc = pbmc,
-                                          plots_SO_before_filtering = plot_grid(plot1, plot2, plot3, nrow = 3, labels = file_name))
+                                          plots_SO_before_filtering = plot_grid(plot1, plot2, bottom_row, nrow = 3, hjust = -1.6, labels = file_name))
     message(file_name)
+    
+    # Save as pdf filtered data sets (1 page per data set)
+    pdf("plots_SO_before_filtering.pdf")
+        for (i in 1:length(pbmc_files))
+        {
+            print(pbmc_files[[i]][["plots_SO_before_filtering"]])
+        }
+    dev.off()
 }
+message("plots saved as pdf! Check them")
 ```
 
 ```{r}
@@ -67,11 +78,13 @@ for (i in 1:length(pbmc_files))
     plot1 = FeatureScatter(pbmc, feature1 = "nCount_RNA", feature2 = "percent.mt",)
     plot2 = FeatureScatter(pbmc, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
     plot3 = VlnPlot(pbmc, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
-    pbmc_files[[i]][["plots_SO_after_filtering"]] = plot_grid(plot1, plot2, plot3, nrow = 3, labels = names(pbmc_files)[i])
+    
+    bottom_row <- plot_grid(plot3, ncol = 2)
+    pbmc_files[[i]][["plots_SO_after_filtering"]] = plot_grid(plot1, plot2, bottom_row, nrow = 3, hjust = -1.6, labels = names(pbmc_files)[i])
     
 }
 
-# Save as pdf non-filtered data sets (1 page per data set)
+# Save as pdf filtered data sets (1 page per data set)
 pdf("plots_SO_after_filtering.pdf")
     for (i in 1:length(pbmc_files))
     {
@@ -142,7 +155,7 @@ for (i in 1:length(pbmc_files))
 ```{r}
 # Sum the total number of cells in the end
 a = 0
-for (i in 1:7)
+for (i in 1:length(pbmc_files))
 {
     x = print(Cells(pbmc_files[[i]]$pbmc) %>% length)
     a = a + x
