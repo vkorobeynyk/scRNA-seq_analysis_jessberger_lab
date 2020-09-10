@@ -1,0 +1,554 @@
+---
+title: An R Markdown document converted from "git/scRNA-seq_analysis_jessberger_lab/06_prediction_SVM/SVM.ipynb"
+output: html_document
+---
+
+```{r}
+library(dplyr)
+library(bmrm)
+library(e1071)
+library(purrr)
+library(parallel)
+```
+
+#Context
+
+We used Machine learning apporaches (here SVM) to show that we can distinguish between Gli1 and Ascl1 cells using
+DEG, which are common to ndNSC and dNSC, that were computed 02_differential_analysis.
+!! This script was run for 10 min in a 8CPU | 32GB RAM machine.
+
+
+
+# Function for randomly sample the dataset into train and test
+
+```{r}
+# i.e. if Ascl1 cells in total are 62 and Gli 120, then the training set will consist of 50% Ascl = 31 and 31 of Gli
+create_dataset_train_test_randomsampling = function(df, p , seed, scale) {
+
+    # df - data.frame that contains all data
+    # p is a proportion of data to use for training (it takes the proportion of the less populated class of cells)
+    # seed - seed to sample randomly in each iteration
+    # scale - bool to indicate if to scale data or not
+    
+set.seed(seed)
+# Transpose matrix to have cells as rows
+if(any(grep("Ascl", colnames(df)) == T))
+{
+    df = t(as.matrix(df))
+}
+    
+if(scale == TRUE)
+{
+    df = scale(df)
+}
+
+
+                        ### Train dataset
+    
+## Split data separately for Gli and Ascl to have the same proportion
+n_G = grep("Gli1", rownames(df))
+n_A = grep("Ascl1", rownames(df))
+min = min(length(n_A), length(n_G))
+
+# modify min to select the same number os cells for training
+n_Asampled = sample(n_A, size = min * p, replace = F)
+n_Gsampled = sample(n_G, size = min * p, replace = F)
+df_train = df[c(n_Asampled,n_Gsampled),]
+df_test = df[-c(n_Asampled,n_Gsampled),]
+
+    
+# Generate labels for the Gli and Ascl dataset
+vec = seq(1, nrow(df_train), 1)
+label = ifelse(vec %in% grep("Gli", rownames(df_train)), "Gli1", "Ascl1") %>% as.factor
+
+                    #### Test dataset
+
+# Generate label for test dataset
+vec = seq(1, nrow(df_test), 1)
+data_test_result = ifelse(vec %in% grep("Gli", rownames(df_test)), "Gli1", "Ascl1") %>% as.factor    
+
+    print(paste0("Total percentage of cells used for training: ", min * p * 2 / nrow(df)))
+    
+    # Print table to know the amount of cells for testing / training
+    # first entry is the number of cells used in training and 2nd entry the number of cells used in testing
+    x1 = grep("Gli", rownames(df_test)) %>% length
+    x2 = grep("Ascl", rownames(df_test)) %>% length
+
+    samples_Ascl1 =  c(n_Asampled %>% length,x2)
+    samples_Gli1 = c(n_Gsampled %>% length, x1)
+    df_print = data.frame(Gli = samples_Gli1, Ascl1 = samples_Ascl1)
+    rownames(df_print) = c("training","testing")
+    
+    print.data.frame(df_print)
+    
+    ret = list(
+        df_train = df_train,
+        df_test = df_test,
+        data_test_result = data_test_result,
+        label = label)
+    
+    return(ret)
+    
+    
+}
+```
+
+# Load data and genes
+
+```{r}
+load("../data/SO_Gli_Ascl_comb_int.Robj")
+data_all = pbmc.combined@assays$RNA@data
+# Read the batch affected genes and take the once with p_val_adj == 0
+
+genes_dNSC = readRDS(file.path('..', 'data', 'diff_expression_dNSC.rds'))
+genes_ndNSC = readRDS(file.path('..', 'data', 'diff_expression_ndNSC.rds'))
+
+genes_model = intersect(genes_dNSC,genes_ndNSC)
+
+# Create vector with ndNSC and a vector with dNSC cells
+
+#dNSC
+x = which(pbmc.combined@meta.data$cluster == "dNSC")
+cells_dNSC = rownames(pbmc.combined@meta.data)[x]
+#ndNSC
+x= which(pbmc.combined@meta.data$cluster == "ndNSC") 
+cells_ndNSC = rownames(pbmc.combined@meta.data)[x]
+cells_ndNSC_dNSC = append(cells_dNSC,cells_ndNSC)
+
+data = data_all[genes_model, cells_ndNSC_dNSC]
+
+# Check wheter we have correct data (9 330)
+dim(data)
+```
+
+# Predict with e1071
+
+```{r}
+# Use all data_pred of ascl and gli independently of the day and do random sampling
+seeds = seq(1,1000,1)
+
+# Setup cluster
+cl <- makeCluster(detectCores())
+
+# Loading all packages necesary | variables | functions
+invisible(clusterEvalQ(cl, library("dplyr")))
+invisible(clusterEvalQ(cl, library("e1071")))
+clusterExport(cl, c("create_dataset_train_test_randomsampling"), envir = environment())
+clusterExport(cl, c("data"), envir = environment())
+
+output_9_genes_svm_e1071_1000seed = parLapply(cl,seeds, function(seed) {
+    dataset_rf_randomsampling = create_dataset_train_test_randomsampling(data, 0.5, seed, scale = TRUE)
+
+
+    # Data
+    data_train = dataset_rf_randomsampling$df_train %>% data.frame
+    data_train$label = dataset_rf_randomsampling$label
+    data_test = dataset_rf_randomsampling$df_test
+    result = as.factor(dataset_rf_randomsampling$data_test_result)
+
+
+    # Tune parameter Cost
+    par_tuned = tune("svm", label ~. , data = data_train, ranges = list(cost = 2^(-3:3)),
+                     tunecontrol = tune.control(sampling = "cross"))
+
+    # Model
+    set.seed(1)
+    svm_model <- svm(label~., data_train , cost = par_tuned$best.parameters$cost,
+                    kernel = "linear")
+    pred_svm <- predict(svm_model, data_test)
+    f_meas = caret::F_meas(pred_svm, result)
+    acc = mean(pred_svm == result)
+    caret::confusionMatrix(pred_svm, result)
+
+    
+    lst = list(model = svm_model,
+                    pred = pred_svm,
+                    par_tuned = par_tuned,
+                    f_meas = f_meas,
+                    acc = acc,
+                    result = result,
+                    dataset_rf_randomsampling1 = dataset_rf_randomsampling$df_test)
+    return(lst)
+})
+stopCluster(cl)
+```
+
+## Mean accuracy for the model
+
+```{r}
+mean(map_dbl(seq(1,length(seeds),1), function(x){output_9_genes_svm_e1071_1000seed[[x]]$acc}))
+mean(map_dbl(seq(1,length(seeds),1), function(x){output_9_genes_svm_e1071_1000seed[[x]]$f_meas}))
+```
+
+## Generate scores
+
+```{r}
+# Calculate the final Enseble scores over 1000 seeds
+output_list = output_9_genes_svm_e1071_1000seed
+
+total_cell_names = colnames(data)
+
+# Create matrices
+list_final = list(cells = total_cell_names, score = rep(0, length(total_cell_names)))
+
+# add scores (+1) to the cell that was correctly classified and (-1) otherwise
+# Loop over the seeds
+for(i in 1:length(seeds))
+{
+    true_cell_names = output_list[[i]]$dataset_rf_randomsampling1 %>% rownames 
+    # Loop over each predicted cell in the model
+    for(k in 1:length(output_list[[i]]$pred))
+    {
+        cell_predicted = output_list[[i]]$pred[k]
+        cell_true = output_list[[i]]$result[k]
+            
+        # If the prediction was correct add +1 to score of this cell and -1 otherwise
+        if(cell_predicted == cell_true)
+        {
+            n = which(list_final[["cells"]] == true_cell_names[k])
+            list_final[["score"]][[n]] = list_final[["score"]][[n]] + 1
+        }
+        else
+        {
+            n = which(list_final[["cells"]] == true_cell_names[k])
+            list_final[["score"]][[n]] = list_final[["score"]][[n]] - 1
+        }
+    }
+    
+}
+
+df_final = as.data.frame(list_final)
+```
+
+## Final label for predictions
+
+```{r}
+                            # Final label for the prediction
+                            
+# If the score is negative then the cell was, overall, not correctly classified
+df_final$result = 0
+
+# The true classes of each cell
+df_final$true = 0
+for(i in 1:nrow(df_final))
+{
+    if(any(grep("Gli", df_final$cells[i])) & df_final$score[i] < 0)
+    {
+        df_final$result[i] = "Ascl1"
+        df_final$true[i] = "Gli1"
+    } 
+    else if (any(grep("Ascl", df_final$cells[i])) & df_final$score[i] < 0)
+    {
+        df_final$result[i] = "Gli1"
+        df_final$true[i] = "Ascl1"
+    } 
+    else if(any(grep("Ascl", df_final$cells[i])) & df_final$score[i] > 0)
+    {
+
+        df_final$result[i] = "Ascl1"
+        df_final$true[i] = "Ascl1"
+    } 
+    else if(any(grep("Gli", df_final$cells[i])) & df_final$score[i] > 0)
+    {
+        df_final$result[i] = "Gli1"
+        df_final$true[i] = "Gli1"
+    }
+}
+```
+
+## Final accuracy 
+
+```{r}
+caret::F_meas(df_final$result %>% as.factor, df_final$true %>% as.factor)
+caret::recall(df_final$result %>% as.factor, df_final$true %>% as.factor)
+caret::precision(df_final$result %>% as.factor, df_final$true %>% as.factor)
+caret::confusionMatrix(df_final$result %>% as.factor, df_final$true %>% as.factor)
+```
+
+# Predict with BMRM package
+
+```{r}
+# Code for svm_fit and selection of features which best represent the data
+
+svm_fit = function(x_training , x_testing , labels , cell_predict , n , LAMBDA) {
+    
+    # x_training - data.frame that contains training data
+    # x_testing - data.frame that contains testing data
+    # labels - factor containing the labels
+    # cell_predict - str which indicates which cell to predict
+    # n - how many genes to use for the final model (this is when one performs gene selection)
+            #if n = 10(10 negatives and 10 positives)
+    # LAMBDA - which value of LAMBDA to use
+    
+    p = list()
+    
+    
+    # Account for a unbalanced data
+    if(prop.table(table(labels))[1] != 0.5)
+    {
+        loss_weights = ifelse(labels==paste0(cell_predict), sum(labels!=paste0(cell_predict)), sum(labels==paste0(cell_predict)))/length(labels)
+    } else 
+    {
+        loss_weights = 0.5
+    }
+    
+    # nrmb Convex and non-convex risk minimization with L2 regularization
+
+    loss_function = hingeLoss(as.matrix(x_training), labels == paste0(cell_predict), loss.weights = loss_weights)
+    w = nrbm(riskFun = loss_function, LAMBDA)
+    
+    
+    # Takes the genes that have higher (abs) w
+    w_ranked = pmin(rank(+w,ties.method="first"),rank(-w,ties.method="first"))
+    
+    # Keep genes which minimize (abs) w more efficiently and do minimization again
+    x_training_red = x_training[,w_ranked<=n]
+    loss_function_red = hingeLoss(as.matrix(x_training_red), labels == paste0(cell_predict), loss.weight = loss_weights)
+    w_reduced = nrbm(riskFun = loss_function_red, LAMBDA)
+    names(w_reduced) = colnames(x_training_red)
+    
+    # Predict
+    p[["prediction"]] = predict(w_reduced,as.matrix(x_testing[,w_ranked<=n]))
+    
+    p[["w_reduced"]] = w_reduced
+    p[["w"]] = w
+    
+    p
+}
+```
+
+## Cross-validation
+
+```{r}
+# Cross-validation of the model
+svm_CV = function(xfolds, x_training ,labels, cell_predict , n ,LAMBDA) {
+    
+    # xfolds - how many times to do cross-validation
+    # x_training - data.frame that contains training data
+    # labels - vector containing the labels
+    # cell_predict - str which indicates which cell to predict
+    # n - how many genes to use for the final model (this is when one performs gene selection)
+            #if n = 10(10 negatives and 10 positives)
+    # LAMBDA - which value of LAMBDA to use
+    
+    set.seed(1)
+    
+    # split all cells into CV xfolds
+    folds = balanced.cv.fold(labels, xfolds)
+    
+    # perform cross-validation
+    p = lapply(levels(folds),function(x) 
+    {
+        fit_svm_CV = list()   
+        # Select the cells for training
+        training = x_training[folds != x,]
+        testing = x_training[folds == x,]
+        labels_CV = labels[folds != x]
+        true_labels_CV = labels[folds == x]
+        
+        # Fit SVM for each CV
+        fit_svm_CV = svm_fit(x_training = training, x_testing = testing, labels = labels_CV,  cell_predict , n , LAMBDA)
+        
+        # Add the true labels of each testing set to the list
+        #attr(fit_svm_CV, "true_labels") = true_labels_CV
+        fit_svm_CV$true_labels = true_labels_CV
+
+        fit_svm_CV
+        
+    })
+    
+    # Assign the names to the list
+    y = vector()
+    n = sapply(seq(1, xfolds,1),  function(x){y = paste0("folds_",x) ; y})
+    names(p) = n
+    
+    p
+}
+```
+
+```{r}
+# Use all data_pred of ascl and gli independently of the day and do random sampling
+seeds = seq(1,1000,1)
+
+# Setup cluster
+cl = makeCluster(detectCores())
+
+                    # Parameters
+# Folds for cross validation
+xfolds = 5
+
+# Which lambdas (parameter for regularization) to test in CV
+LAMBDA = c(0.001, 0.05,0.1,0.5,1,2)
+
+# Number of genes to take if n = 10(10 negatives and 10 positives)
+# In this case we just have 9 genes so we take all
+n_genes = 5
+
+cell_predict = "Gli1"
+
+
+# Loading all packages necesary | variables | functions
+invisible(clusterEvalQ(cl, {
+    library("dplyr")
+    library("bmrm")
+    library("parallel")
+}))
+clusterExport(cl, c("create_dataset_train_test_randomsampling", "svm_fit", "svm_CV"), envir = environment())
+clusterExport(cl, c("data", "xfolds","LAMBDA","n_genes", "cell_predict"), envir = environment())
+
+output_9_genes_svm_bmrm_1000seed = parLapply(cl,seeds, function(seed) {
+dataset_rf_randomsampling = create_dataset_train_test_randomsampling(data, 0.5, seed, scale = TRUE)
+
+    # Scale train and test Data
+    data_train = dataset_rf_randomsampling$df_train %>% as.data.frame
+    data_label = dataset_rf_randomsampling$label
+    data_test = dataset_rf_randomsampling$df_test %>% as.data.frame
+    result = as.factor(dataset_rf_randomsampling$data_test_result)
+
+                        # Test several values of LAMBDA
+
+    svm_fit_CV_LAMBDA = lapply(LAMBDA, function(x)
+    {
+        svm_fit_CV = svm_CV(xfolds = xfolds ,x_training = data_train, labels = data_label, cell_predict, n = n_genes, LAMBDA = x)
+        svm_fit_CV
+        
+    })
+
+    # Assign the names to the list
+    n = sapply(LAMBDA,  function(x){y = paste0("LAMBDA_",x) ; y})
+    names(svm_fit_CV_LAMBDA) = n
+    
+    
+                        # Calculate f1_score of different LAMBDA parameters
+
+    LAMBDA_acc = sapply(LAMBDA, function(x) {
+        sapply(seq(1,xfolds,1), function(i) 
+        {
+            caret::F_meas(svm_fit_CV_LAMBDA[[paste0("LAMBDA_",x)]][[i]]$prediction %>% as.factor, (svm_fit_CV_LAMBDA[[paste0("LAMBDA_",x)]][[i]]$true_labels == "Gli1") %>% as.factor)
+        }) %>% mean
+    })
+    names(LAMBDA_acc) = LAMBDA
+    LAMBDA_acc
+    
+                        # Final model, LAMBDA which has highest mean / can be done with sd
+    
+    LAMBDA = which.max(LAMBDA_acc) %>% names() %>% as.numeric
+
+    svm_model = svm_fit(x_training = data_train, x_testing = data_test, labels = data_label, cell_predict ,n_genes, LAMBDA)
+
+                        # Accuracy
+    metrics = roc.stat(svm_model$prediction, result == cell_predict)
+    
+    
+    y = ifelse(svm_model$prediction == TRUE, paste(cell_predict), data_label[which(!levels(data_label) %in% cell_predict)] %>% paste)
+    f_meas = caret::F_meas(y %>% as.factor, result %>% as.factor)
+    
+    lst = list(model = svm_model,
+                    eval_metrics = metrics,
+                    f_score = f_meas,
+                    result = result,
+                    pred = y,
+                    CV = svm_fit_CV_LAMBDA,
+                    dataset_rf_randomsampling1 = dataset_rf_randomsampling$df_test)
+    return(lst)
+})
+stopCluster(cl)
+```
+
+```{r}
+# Calculate accuracy of model
+mean(map_dbl(seq(1,length(seeds),1), function(x){output_9_genes_svm_bmrm_1000seed[[x]]$eval_metrics$recall[2]}))
+mean(map_dbl(seq(1,length(seeds),1), function(x){output_9_genes_svm_bmrm_1000seed[[x]]$eval_metrics$precision[2]}))
+mean(map_dbl(seq(1,length(seeds),1), function(x){output_9_genes_svm_bmrm_1000seed[[x]]$f_score}))
+```
+
+## Generate scores
+
+```{r}
+# Calculate the final Enseble scores over 1000 seeds
+output_list = output_9_genes_svm_bmrm_1000seed
+
+total_cell_names = colnames(data)
+
+# Create matrices
+list_final = list(cells = total_cell_names, score = rep(0, length(total_cell_names)))
+
+# add scores (+1) to the cell that was correctly classified and (-1) otherwise
+# Loop over the seeds
+for(i in 1:length(seeds))
+{
+    true_cell_names = output_list[[i]]$dataset_rf_randomsampling1 %>% rownames 
+    # Loop over each predicted cell in the model
+    for(k in 1:length(output_list[[i]]$pred))
+    {
+        cell_predicted = output_list[[i]]$pred[k]
+        cell_true = output_list[[i]]$result[k]
+            
+        # If the prediction was correct add +1 to score of this cell and -1 otherwise
+        if(cell_predicted == cell_true)
+        {
+            n = which(list_final[["cells"]] == true_cell_names[k])
+            list_final[["score"]][[n]] = list_final[["score"]][[n]] + 1
+        }
+        else
+        {
+            n = which(list_final[["cells"]] == true_cell_names[k])
+            list_final[["score"]][[n]] = list_final[["score"]][[n]] - 1
+        }
+    }
+    
+}
+
+df_final = as.data.frame(list_final)
+```
+
+## Final label predictions 
+
+```{r}
+                            # Final label for the prediction
+                            
+# If the score is negative then the cell was, overall, not correctly classified
+df_final$result = 0
+
+# The true classes of each cell
+df_final$true = 0
+for(i in 1:nrow(df_final))
+{
+    if(any(grep("Gli", df_final$cells[i])) & df_final$score[i] < 0)
+    {
+        df_final$result[i] = "Ascl1"
+        df_final$true[i] = "Gli1"
+    } 
+    else if (any(grep("Ascl", df_final$cells[i])) & df_final$score[i] < 0)
+    {
+        df_final$result[i] = "Gli1"
+        df_final$true[i] = "Ascl1"
+    } 
+    else if(any(grep("Ascl", df_final$cells[i])) & df_final$score[i] > 0)
+    {
+
+        df_final$result[i] = "Ascl1"
+        df_final$true[i] = "Ascl1"
+    } 
+    else if(any(grep("Gli", df_final$cells[i])) & df_final$score[i] > 0)
+    {
+        df_final$result[i] = "Gli1"
+        df_final$true[i] = "Gli1"
+    }
+}
+```
+
+```{r}
+# Cells which were wrongly predicted
+df_final[which(df_final$result != df_final$true),]
+```
+
+## Final accuracy 
+
+```{r}
+caret::F_meas(df_final$result %>% as.factor, df_final$true %>% as.factor)
+caret::recall(df_final$result %>% as.factor, df_final$true %>% as.factor)
+caret::precision(df_final$result %>% as.factor, df_final$true %>% as.factor)
+caret::confusionMatrix(df_final$result %>% as.factor, df_final$true %>% as.factor)
+```
+
